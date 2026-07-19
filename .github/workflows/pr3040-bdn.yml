@@ -1,0 +1,68 @@
+name: PR 3040 BenchmarkDotNet matrix
+
+on:
+  push:
+    branches:
+      - artl93-pr3040-bdn-matrix
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+          - name: Windows x64
+            os: windows-latest
+          - name: macOS arm64
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run exact-binary BDN comparison
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-Location pr3040-bdn
+          dotnet --info *> environment.txt
+          Get-FileHash -Algorithm SHA256 local-packages/*.nupkg |
+            Format-Table -AutoSize *> package-hashes.txt
+          dotnet build -c Release --nologo -v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "Benchmark build failed." }
+
+          Remove-Item -Recurse -Force bin/Release/net10.0/PassiveHealthBdn-* -ErrorAction SilentlyContinue
+          $env:BDN_JOB = "Dry"
+          dotnet run -c Release --no-build -- --filter "*" --noOverwrite --artifacts "$PWD/artifacts/dry" *> dry.log
+          if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet dry validation failed." }
+
+          Remove-Item -Recurse -Force bin/Release/net10.0/PassiveHealthBdn-* -ErrorAction SilentlyContinue
+          $env:BDN_JOB = "Short"
+          dotnet run -c Release --no-build -- --filter "*" --apples --noOverwrite --artifacts "$PWD/artifacts/short" *> short.log
+          if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet measurement failed." }
+
+      - name: Upload raw BDN evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr3040-bdn-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            pr3040-bdn/artifacts
+            pr3040-bdn/dry.log
+            pr3040-bdn/short.log
+            pr3040-bdn/environment.txt
+            pr3040-bdn/package-hashes.txt
+          if-no-files-found: error
+          retention-days: 90
+
