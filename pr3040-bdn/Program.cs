@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.IO.Hashing;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks.Sources;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Columns;
@@ -19,6 +21,8 @@ using Yarp.ReverseProxy.Configuration;
 using Yarp.ReverseProxy.Forwarder;
 using Yarp.ReverseProxy.Health;
 using Yarp.ReverseProxy.LoadBalancing;
+using Yarp.ReverseProxy.Model;
+using Yarp.ReverseProxy.SessionAffinity;
 
 var job = Environment.GetEnvironmentVariable("BDN_JOB") switch
 {
@@ -48,8 +52,15 @@ public enum PipelineScenario
 {
     DefaultMinimalAsync,
     DefaultMinimalSync,
+    Routes100Async,
     Routes1000Async,
+    Destinations8RoundRobinAsync,
+    Destinations64RoundRobinAsync,
+    Destinations8P2CAsync,
     Destinations64P2CAsync,
+    Affinity8MissAsync,
+    Affinity8HitAsync,
+    HealthyFiltering5Async,
     PassiveHealthEnabledAsync,
     CustomNoPassiveAsync,
 }
@@ -60,6 +71,7 @@ public class PassiveHealthPipelineBenchmark
     private IServiceProvider _services = null!;
     private StubForwarder _forwarder = null!;
     private string _path = "/";
+    private string? _cookie;
 
     [ParamsAllValues]
     public PipelineScenario Scenario { get; set; }
@@ -71,8 +83,9 @@ public class PassiveHealthPipelineBenchmark
         var settings = GetSettings(Scenario);
         var (routes, clusters) = BuildConfig(settings);
         (_pipeline, _services, _forwarder) = BuildProxyPipeline(
-            routes, clusters, settings.ForceAsync, settings.CustomNoPassive);
+            routes, clusters, settings.ForceAsync, settings.CustomNoPassive, settings.HealthyFiltering);
         _path = settings.RouteCount == 1 ? "/" : $"/r{settings.RouteCount - 1}/item";
+        _cookie = settings.AffinityHit ? "yarp.affinity=" + HashDestination("dest0") : null;
     }
 
     private static void VerifyProductAssembly()
@@ -101,6 +114,10 @@ public class PassiveHealthPipelineBenchmark
         context.Request.Host = new HostString("localhost");
         context.Request.Path = _path;
         context.Request.Protocol = "HTTP/1.1";
+        if (_cookie is not null)
+        {
+            context.Request.Headers.Cookie = _cookie;
+        }
         var task = _pipeline(context);
         _forwarder.Complete();
         return task;
@@ -108,12 +125,19 @@ public class PassiveHealthPipelineBenchmark
 
     private static ScenarioSettings GetSettings(PipelineScenario scenario) => scenario switch
     {
-        PipelineScenario.DefaultMinimalAsync => new(1, 1, null, false, true, false),
-        PipelineScenario.DefaultMinimalSync => new(1, 1, null, false, false, false),
-        PipelineScenario.Routes1000Async => new(1000, 1, null, false, true, false),
-        PipelineScenario.Destinations64P2CAsync => new(1, 64, LoadBalancingPolicies.PowerOfTwoChoices, false, true, false),
-        PipelineScenario.PassiveHealthEnabledAsync => new(1, 1, null, true, true, false),
-        PipelineScenario.CustomNoPassiveAsync => new(1, 1, null, false, true, true),
+        PipelineScenario.DefaultMinimalAsync => new(1, 1, null, false, false, false, false, true, false),
+        PipelineScenario.DefaultMinimalSync => new(1, 1, null, false, false, false, false, false, false),
+        PipelineScenario.Routes100Async => new(100, 1, null, false, false, false, false, true, false),
+        PipelineScenario.Routes1000Async => new(1000, 1, null, false, false, false, false, true, false),
+        PipelineScenario.Destinations8RoundRobinAsync => new(1, 8, LoadBalancingPolicies.RoundRobin, false, false, false, false, true, false),
+        PipelineScenario.Destinations64RoundRobinAsync => new(1, 64, LoadBalancingPolicies.RoundRobin, false, false, false, false, true, false),
+        PipelineScenario.Destinations8P2CAsync => new(1, 8, LoadBalancingPolicies.PowerOfTwoChoices, false, false, false, false, true, false),
+        PipelineScenario.Destinations64P2CAsync => new(1, 64, LoadBalancingPolicies.PowerOfTwoChoices, false, false, false, false, true, false),
+        PipelineScenario.Affinity8MissAsync => new(1, 8, LoadBalancingPolicies.PowerOfTwoChoices, true, false, false, false, true, false),
+        PipelineScenario.Affinity8HitAsync => new(1, 8, LoadBalancingPolicies.PowerOfTwoChoices, true, true, false, false, true, false),
+        PipelineScenario.HealthyFiltering5Async => new(1, 5, LoadBalancingPolicies.PowerOfTwoChoices, false, false, true, false, true, false),
+        PipelineScenario.PassiveHealthEnabledAsync => new(1, 1, null, false, false, false, true, true, false),
+        PipelineScenario.CustomNoPassiveAsync => new(1, 1, null, false, false, false, false, true, true),
         _ => throw new ArgumentOutOfRangeException(nameof(scenario)),
     };
 
@@ -145,15 +169,27 @@ public class PassiveHealthPipelineBenchmark
             ClusterId = "cluster0",
             Destinations = destinations,
             LoadBalancingPolicy = settings.LoadBalancingPolicy,
-            HealthCheck = settings.PassiveHealth
+            SessionAffinity = settings.AffinityEnabled
+                ? new SessionAffinityConfig
+                {
+                    Enabled = true,
+                    Policy = SessionAffinityConstants.Policies.HashCookie,
+                    FailurePolicy = SessionAffinityConstants.FailurePolicies.Redistribute,
+                    AffinityKeyName = "yarp.affinity",
+                }
+                : null,
+            HealthCheck = settings.PassiveHealth || settings.HealthyFiltering
                 ? new HealthCheckConfig
                 {
-                    Passive = new PassiveHealthCheckConfig
-                    {
-                        Enabled = true,
-                        Policy = "TransportFailureRate",
-                        ReactivationPeriod = TimeSpan.FromSeconds(10),
-                    },
+                    AvailableDestinationsPolicy = settings.HealthyFiltering ? "HealthyAndUnknown" : null,
+                    Passive = settings.PassiveHealth || settings.HealthyFiltering
+                        ? new PassiveHealthCheckConfig
+                        {
+                            Enabled = true,
+                            Policy = "TransportFailureRate",
+                            ReactivationPeriod = TimeSpan.FromSeconds(10),
+                        }
+                        : null,
                 }
                 : null,
         };
@@ -165,7 +201,8 @@ public class PassiveHealthPipelineBenchmark
         RouteConfig[] routes,
         ClusterConfig[] clusters,
         bool forceAsync,
-        bool customNoPassive)
+        bool customNoPassive,
+        bool healthyFiltering)
     {
         var services = new ServiceCollection();
         services.AddLogging(builder => builder.SetMinimumLevel(LogLevel.Warning));
@@ -197,13 +234,48 @@ public class PassiveHealthPipelineBenchmark
             }
         });
 
-        return (app.Build(), provider, forwarder);
+        var pipeline = app.Build();
+        if (healthyFiltering)
+        {
+            var lookupType = typeof(RouteConfig).Assembly.GetType("Yarp.ReverseProxy.Management.ProxyConfigManager")
+                ?? throw new InvalidOperationException("ProxyConfigManager type was not found.");
+            var lookup = provider.GetRequiredService(lookupType);
+            var arguments = new object?[] { "cluster0", null };
+            var found = (bool)(lookupType.GetMethod("TryGetCluster")?.Invoke(lookup, arguments)
+                ?? throw new InvalidOperationException("IProxyStateLookup.TryGetCluster was not found."));
+            if (!found || arguments[1] is not ClusterState cluster)
+            {
+                throw new InvalidOperationException("cluster0 was not loaded.");
+            }
+
+            foreach (var destination in cluster.Destinations.Values.Skip(2))
+            {
+                destination.Health.Passive = DestinationHealth.Unhealthy;
+            }
+            provider.GetRequiredService<IClusterDestinationsUpdater>().UpdateAvailableDestinations(cluster);
+            if (cluster.DestinationsState.AvailableDestinations.Count != 2)
+            {
+                throw new InvalidOperationException(
+                    $"Healthy filtering retained {cluster.DestinationsState.AvailableDestinations.Count} destinations instead of two.");
+            }
+        }
+
+        return (pipeline, provider, forwarder);
+    }
+
+    private static string HashDestination(string destinationId)
+    {
+        var bytes = Encoding.Unicode.GetBytes(destinationId.ToUpperInvariant());
+        return Convert.ToHexStringLower(global::System.IO.Hashing.XxHash64.Hash(bytes));
     }
 
     private sealed record ScenarioSettings(
         int RouteCount,
         int DestinationCount,
         string? LoadBalancingPolicy,
+        bool AffinityEnabled,
+        bool AffinityHit,
+        bool HealthyFiltering,
         bool PassiveHealth,
         bool ForceAsync,
         bool CustomNoPassive);

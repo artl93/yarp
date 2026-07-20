@@ -6,11 +6,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <YarpPackageVersion Condition="'$(YarpPackageVersion)' == ''">0.0.0-candidate</YarpPackageVersion>
-    <RestoreSources>$(RestoreSources);$(MSBuildThisFileDirectory)local-packages</RestoreSources>
+    <RestoreSources>https://api.nuget.org/v3/index.json;$(MSBuildThisFileDirectory)local-packages</RestoreSources>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
     <PackageReference Include="Yarp.ReverseProxy.BdnHarness" Version="$(YarpPackageVersion)" />
   </ItemGroup>
 
