@@ -12,7 +12,9 @@ using BenchmarkDotNet.Exporters.Csv;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -206,6 +208,7 @@ public class PassiveHealthPipelineBenchmark
     {
         var services = new ServiceCollection();
         services.AddLogging(builder => builder.SetMinimumLevel(LogLevel.Warning));
+        services.AddSingleton<IServer, StubServer>();
         services.AddMetrics();
         var listener = new DiagnosticListener("PassiveHealthBdn");
         services.AddSingleton(listener);
@@ -279,6 +282,20 @@ public class PassiveHealthPipelineBenchmark
         bool PassiveHealth,
         bool ForceAsync,
         bool CustomNoPassive);
+
+    private sealed class StubServer : IServer
+    {
+        public IFeatureCollection Features { get; } = new FeatureCollection();
+
+        public void Dispose()
+        {
+        }
+
+        public Task StartAsync<TContext>(IHttpApplication<TContext> application, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
 
     private sealed class StubForwarder : IHttpForwarder, IValueTaskSource<ForwarderError>
     {
